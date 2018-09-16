@@ -25,6 +25,7 @@ from tensorflow.python.platform import flags
 
 import data_provider
 import common_flags
+import math
 
 FLAGS = flags.FLAGS
 common_flags.define()
@@ -39,16 +40,19 @@ flags.DEFINE_string('eval_log_dir', '/tmp/attention_ocr/eval',
 flags.DEFINE_integer('eval_interval_secs', 60,
                      'Frequency in seconds to run evaluations.')
 
-flags.DEFINE_integer('number_of_steps', None,
+flags.DEFINE_integer('number_of_steps', 1,
                      'Number of times to run evaluation.')
 # yapf: enable
 
 
 def main(_):
+  tf.set_random_seed(123)
   if not tf.gfile.Exists(FLAGS.eval_log_dir):
     tf.gfile.MakeDirs(FLAGS.eval_log_dir)
+  print(FLAGS.split_name)
 
   dataset = common_flags.create_dataset(split_name=FLAGS.split_name)
+
   model = common_flags.create_model(dataset.num_char_classes,
                                     dataset.max_sequence_length,
                                     dataset.num_of_views, dataset.null_code)
@@ -56,19 +60,24 @@ def main(_):
       dataset,
       FLAGS.batch_size,
       augment=False,
+      shuffle=False,
       central_crop_size=common_flags.get_crop_size())
   endpoints = model.create_base(data.images, labels_one_hot=None)
   model.create_loss(data, endpoints)
   eval_ops = model.create_summaries(
       data, endpoints, dataset.charset, is_training=False)
   slim.get_or_create_global_step()
-  session_config = tf.ConfigProto(device_count={"GPU": 0})
+  session_config = tf.ConfigProto()
+
+  num_evals = dataset.num_samples / FLAGS.batch_size
+  session_config.gpu_options.allow_growth=True
   slim.evaluation.evaluation_loop(
       master=FLAGS.master,
       checkpoint_dir=FLAGS.train_log_dir,
       logdir=FLAGS.eval_log_dir,
       eval_op=eval_ops,
-      num_evals=FLAGS.num_batches,
+      num_evals=num_evals,
+      timeout=0.01,
       eval_interval_secs=FLAGS.eval_interval_secs,
       max_number_of_evaluations=FLAGS.number_of_steps,
       session_config=session_config)

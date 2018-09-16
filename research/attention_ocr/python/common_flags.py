@@ -38,11 +38,17 @@ logging.basicConfig(
 def define():
   """Define common flags."""
   # yapf: disable
-  flags.DEFINE_integer('batch_size', 32,
+  flags.DEFINE_integer('batch_size', 16,
                        'Batch size.')
 
   flags.DEFINE_integer('crop_width', None,
                        'Width of the central crop for images.')
+
+  flags.DEFINE_integer('sampling_start', 0,
+                       'Epoch when LSTM starts to sample.')
+
+  flags.DEFINE_integer('sampling_end', 160000,
+                       'Epoch when LSTM only samples.')
 
   flags.DEFINE_integer('crop_height', None,
                        'Height of the central crop for images.')
@@ -73,7 +79,7 @@ def define():
   flags.DEFINE_string('optimizer', 'momentum',
                       'the optimizer to use')
 
-  flags.DEFINE_string('momentum', 0.9,
+  flags.DEFINE_float('momentum', 0.9,
                       'momentum value for the momentum optimizer if used')
 
   flags.DEFINE_bool('use_augment_input', True,
@@ -108,8 +114,25 @@ def define():
   flags.DEFINE_bool('ignore_nulls', True,
                     'ignore null characters for computing the loss')
 
+  flags.DEFINE_bool('use_encoding', True,
+                    'Use coords encoding')
+
+  flags.DEFINE_string('model_id', 'old_api_bahdanau',"""
+                      Supported values:\n
+                      new_api_bahdanau = new API + Bahdanau\n
+                      new_api_luong = new API + Luong\n
+                      new_api_bahdanau_linear_sampling = new API + Bahdanau + linear sampling from sampling_start to sampling_end\n
+                      new_api_luong_linear_sampling = new API + Luong + linear sampling from sampling_start to sampling_end\n
+                      old_api_bahdanau = old API + Bahdanau (original)\n
+                      old_api_bahdanau_bilstm = old API + Bahdanau + BiLSTM encoder\n
+                      new_api_bahdanau_bilstm = new API + Bahdanau + BiLSTM encoder\n
+                      new_api_luong_bilstm = new API + Luong + BiLSTM encoder\n
+                      old_api_bilstm = old API + Bahdanau + BiLSTM encoder\n
+                      """)
+
   flags.DEFINE_bool('average_across_timesteps', False,
                     'divide the returned cost by the total label weight')
+
   # yapf: enable
 
 
@@ -135,12 +158,16 @@ def create_mparams():
           use_autoregression=FLAGS.use_autoregression,
           num_lstm_units=FLAGS.num_lstm_units,
           weight_decay=FLAGS.weight_decay,
-          lstm_state_clip_value=FLAGS.lstm_state_clip_value),
+          lstm_state_clip_value=FLAGS.lstm_state_clip_value,
+          model_id=FLAGS.model_id,
+      sampling_start=FLAGS.sampling_start,
+      sampling_end=FLAGS.sampling_end),
       'sequence_loss_fn':
       model.SequenceLossParams(
           label_smoothing=FLAGS.label_smoothing,
           ignore_nulls=FLAGS.ignore_nulls,
-          average_across_timesteps=FLAGS.average_across_timesteps)
+          average_across_timesteps=FLAGS.average_across_timesteps),
+      'use_encoding': FLAGS.use_encoding
   }
 
 

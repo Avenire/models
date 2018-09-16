@@ -51,6 +51,7 @@ def create_layer(layer_class, batch_size, seq_length, num_char_classes):
   labels_one_hot = fake_labels(batch_size, seq_length, num_char_classes)
   layer_params = sequence_layers.SequenceLayerParams(
       num_lstm_units=10, weight_decay=0.00004, lstm_state_clip_value=10.0)
+
   return layer_class(net, labels_one_hot, model_params, layer_params)
 
 
@@ -106,6 +107,19 @@ class SequenceLayersTest(tf.test.TestCase):
     self.assertEqual(
         tf.TensorShape([batch_size, seq_length, num_char_classes]),
         char_logits.get_shape())
+
+  def test_attention_with_autoregression_withss_char_logits_with_correct_shape(self):
+    batch_size = 2
+    seq_length = 3
+    num_char_classes = 4
+
+    layer = create_layer(sequence_layers.NewAPIAttentionWithAutoregression,
+                         batch_size, seq_length, num_char_classes)
+    char_logits = layer.create_logits()
+
+    self.assertEqual(
+        tf.TensorShape([batch_size, seq_length, num_char_classes]),
+        tf.TensorShape(char_logits.shape))
 
 
 if __name__ == '__main__':

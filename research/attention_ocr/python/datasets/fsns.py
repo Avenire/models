@@ -32,6 +32,10 @@ DEFAULT_CONFIG = {
             'size': 1044868,
             'pattern': 'train/train*'
         },
+        'eval_full': {
+            'size': 36554,
+            'pattern': 'eval_full/*'
+        },
         'test': {
             'size': 20404,
             'pattern': 'test/test*'

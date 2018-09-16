@@ -26,6 +26,7 @@ Usage example:
 import sys
 import collections
 import logging
+import numpy as np
 import tensorflow as tf
 from tensorflow.contrib import slim
 from tensorflow.contrib.slim.nets import inception
@@ -48,7 +49,7 @@ ConvTowerParams = collections.namedtuple('ConvTowerParams', ['final_endpoint'])
 
 SequenceLogitsParams = collections.namedtuple('SequenceLogitsParams', [
   'use_attention', 'use_autoregression', 'num_lstm_units', 'weight_decay',
-  'lstm_state_clip_value'
+  'lstm_state_clip_value', 'model_id', 'sampling_start', 'sampling_end'
 ])
 
 SequenceLossParams = collections.namedtuple('SequenceLossParams', [
@@ -152,7 +153,7 @@ class Model(object):
     super(Model, self).__init__()
     self._params = ModelParams(
       num_char_classes=num_char_classes,
-      seq_length=seq_length,
+      seq_length=seq_length+1,
       num_views=num_views,
       null_code=null_code)
     self._mparams = self.default_mparams()
@@ -170,13 +171,17 @@ class Model(object):
           use_autoregression=True,
           num_lstm_units=256,
           weight_decay=0.00004,
-          lstm_state_clip_value=10.0),
+          lstm_state_clip_value=10.0,
+        model_id='old_api_bahdanau',
+        sampling_start=0,
+        sampling_end=160000),
       'sequence_loss_fn':
         SequenceLossParams(
           label_smoothing=0.1,
           ignore_nulls=True,
           average_across_timesteps=False),
-      'encode_coordinates_fn': EncodeCoordinatesParams(enabled=False)
+      'encode_coordinates_fn': EncodeCoordinatesParams(enabled=True),
+      'use_encoding': True
     }
 
   def set_mparam(self, function, **kwargs):
@@ -238,7 +243,8 @@ class Model(object):
     # TODO(gorban): remove /alias suffixes from the scopes.
     with tf.variable_scope('sequence_logit_fn/SQLR'):
       layer_class = sequence_layers.get_layer_class(mparams.use_attention,
-                                                    mparams.use_autoregression)
+                                                    mparams.use_autoregression,
+                                                    mparams.model_id)
       layer = layer_class(net, labels_one_hot, self._params, mparams)
       return layer.create_logits()
 
@@ -321,8 +327,8 @@ class Model(object):
     Returns:
       a tensor with the same height and width, but altered feature_size.
     """
-    mparams = self._mparams['encode_coordinates_fn']
-    if mparams.enabled:
+    use_encoding = self._mparams['use_encoding']
+    if use_encoding:
       batch_size, h, w, _ = net.shape.as_list()
       x, y = tf.meshgrid(tf.range(w), tf.range(h))
       w_loc = slim.one_hot_encoding(x, num_classes=w)
@@ -370,6 +376,7 @@ class Model(object):
       net = self.pool_views_fn(nets)
       logging.debug('Pooled views: %s', net)
 
+      logging.debug('Shape o net: %s', net.shape)
       chars_logit = self.sequence_logit_fn(net, labels_one_hot)
       logging.debug('chars_logit: %s', chars_logit)
 
@@ -456,6 +463,8 @@ class Model(object):
       batch_size, seq_length, _ = chars_logits.shape.as_list()
       if mparams.ignore_nulls:
         weights = tf.ones((batch_size, seq_length), dtype=tf.float32)
+        logging.debug("Zero out first weight")
+        weights = tf.concat([tf.expand_dims(0.0*weights[:, 0], 1), weights[:, 1:]], 1)
       else:
         # Suppose that reject character is the last in the charset.
         reject_char = tf.constant(
@@ -496,13 +505,14 @@ class Model(object):
       return '%s/%s' % (prefix, label)
 
     max_outputs = 4
-    # TODO(gorban): uncomment, when tf.summary.text released.
-    # charset_mapper = CharsetMapper(charset)
-    # pr_text = charset_mapper.get_text(
-    #     endpoints.predicted_chars[:max_outputs,:])
-    # tf.summary.text(sname('text/pr'), pr_text)
-    # gt_text = charset_mapper.get_text(data.labels[:max_outputs,:])
-    # tf.summary.text(sname('text/gt'), gt_text)
+
+    charset_mapper = CharsetMapper(charset)
+    for i in range(0, endpoints.predicted_chars.shape[0]):
+      pr_text = charset_mapper.get_text(
+        [tf.to_int64(endpoints.predicted_chars[i,1:]), data.labels[i, 1:]])
+      tf.summary.text(sname('text/pr_vs_gt/%d'%(i)), pr_text)
+
+
     tf.summary.image(sname('image'), data.images, max_outputs=max_outputs)
 
     if is_training:
@@ -568,6 +578,7 @@ class Model(object):
     logging.info('variables_to_restore:\n%s' % utils.variables_to_restore().keys())
     logging.info('moving_average_variables:\n%s' % [v.op.name for v in tf.moving_average_variables()])
     logging.info('trainable_variables:\n%s' % [v.op.name for v in tf.trainable_variables()])
+    logging.info('count_trainables:\n%d' % np.sum([np.prod(v.shape) for v in tf.trainable_variables()]))
     if master_checkpoint:
       assign_from_checkpoint(utils.variables_to_restore(), master_checkpoint)
 

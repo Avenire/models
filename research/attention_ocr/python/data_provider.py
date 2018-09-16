@@ -155,7 +155,7 @@ def get_data(dataset,
              augment=False,
              central_crop_size=None,
              shuffle_config=None,
-             shuffle=True):
+             shuffle=True, seed=None):
   """Wraps calls to DatasetDataProviders and shuffle_batch.
 
   For more details about supported Dataset objects refer to datasets/fsns.py.
@@ -174,26 +174,38 @@ def get_data(dataset,
   if not shuffle_config:
     shuffle_config = DEFAULT_SHUFFLE_CONFIG
 
+  seed = seed if shuffle else seed
   provider = slim.dataset_data_provider.DatasetDataProvider(
       dataset,
+      seed=seed,
       shuffle=shuffle,
       common_queue_capacity=2 * batch_size,
       common_queue_min=batch_size)
   image_orig, label = provider.get(['image', 'label'])
 
-  image = preprocess_image(
+  images = preprocess_image(
       image_orig, augment, central_crop_size, num_towers=dataset.num_of_views)
   label_one_hot = slim.one_hot_encoding(label, dataset.num_char_classes)
 
-  images, images_orig, labels, labels_one_hot = (tf.train.shuffle_batch(
-      [image, image_orig, label, label_one_hot],
+  if shuffle:
+    images, images_orig, labels, labels_one_hot = (tf.train.shuffle_batch(
+      [images, image_orig, label, label_one_hot],
       batch_size=batch_size,
       num_threads=shuffle_config.num_batching_threads,
       capacity=shuffle_config.queue_capacity,
       min_after_dequeue=shuffle_config.min_after_dequeue))
-
+  else:
+    images, images_orig, labels, labels_one_hot = (tf.train.batch(
+          [images, image_orig, label, label_one_hot],
+          batch_size=batch_size,
+          num_threads=1,
+          capacity=shuffle_config.queue_capacity))
+  start_seq_one_hot = tf.expand_dims(tf.zeros([batch_size, dataset.num_char_classes]), 1)
+  start_seq = tf.zeros([batch_size, 1], dtype=tf.int64)
+  labels_ex = tf.concat([start_seq, labels], 1)
+  labels_one_hot_ex = tf.concat([start_seq_one_hot, labels_one_hot], 1)
   return InputEndpoints(
       images=images,
       images_orig=images_orig,
-      labels=labels,
-      labels_one_hot=labels_one_hot)
+      labels=labels_ex,
+      labels_one_hot=labels_one_hot_ex)

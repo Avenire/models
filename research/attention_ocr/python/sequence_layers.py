@@ -41,9 +41,70 @@ import logging
 import numpy as np
 
 import tensorflow as tf
-
 from tensorflow.contrib import slim
 
+from tensorflow.python.ops import nn_ops
+from tensorflow.python.ops import array_ops
+
+
+def create_sampling_if_enabled_in_mparams(mparams, is_training):
+  linear_sampling_enabled = 'linear_sampling' in mparams.model_id
+  if not is_training:
+    sampling_probability = tf.constant(1.0, dtype=tf.float32)
+  elif linear_sampling_enabled:
+    logging.debug('Using scheduled sampling with linear change.')
+    sampling_probability = 1.0 - tf.train.polynomial_decay(
+      1.0,
+      tf.maximum(tf.constant(0, dtype=tf.int64),
+                 tf.train.get_or_create_global_step() - tf.constant(mparams.sampling_start,
+                                                                    dtype=tf.int64)),
+      mparams.sampling_end - mparams.sampling_start,
+      end_learning_rate=0.0,
+      power=1.0,
+      cycle=False,
+      name=None
+    )
+  else:
+    sampling_probability = tf.constant(0.0, dtype=tf.float32)
+  tf.summary.scalar('scheduled_sampling_prob', sampling_probability)
+  return sampling_probability
+
+def create_bilstm_encoder_if_enabled_in_mparams(net, mparams, batch_size):
+  is_bidirectional = 'bilstm' in mparams.model_id
+  if is_bidirectional:
+    logging.debug('Using BiLSTM encoder.')
+    with tf.variable_scope("BidirectionalEncoder") as scope:
+      encoder_inputs = net
+      encoder_cell = tf.contrib.rnn.LSTMCell(
+        mparams.num_lstm_units,
+        use_peepholes=False,
+        cell_clip=mparams.lstm_state_clip_value,
+        state_is_tuple=True,
+        initializer=orthogonal_initializer)
+      ((encoder_fw_outputs,
+        encoder_bw_outputs),
+       (encoder_fw_state,
+        encoder_bw_state)) = (
+        tf.nn.bidirectional_dynamic_rnn(cell_fw=encoder_cell,
+                                        cell_bw=encoder_cell,
+                                        inputs=encoder_inputs,
+                                        sequence_length=[encoder_inputs.shape[1].value] * batch_size,
+                                        time_major=False,
+                                        dtype=tf.float32)
+      )
+      return tf.concat((encoder_fw_outputs, encoder_bw_outputs), 2)
+  return net
+
+
+def select_attention_mechanism(inputs, mparams):
+  if 'bahdanau' in mparams.model_id:
+    logging.debug('Using Bahdanau attention score.')
+    return tf.contrib.seq2seq.BahdanauAttention(num_units=mparams.num_lstm_units, memory=inputs)
+  elif 'luong' in mparams.model_id:
+    logging.debug('Using Luong attention score.')
+    return tf.contrib.seq2seq.LuongAttention(num_units=mparams.num_lstm_units, memory=inputs)
+  else:
+    raise AssertionError('Could not read attention mechanism from model_id.')
 
 def orthogonal_initializer(shape, dtype=tf.float32, *args, **kwargs):
   """Generates orthonormal matrices with random values.
@@ -81,7 +142,7 @@ def orthogonal_initializer(shape, dtype=tf.float32, *args, **kwargs):
 
 
 SequenceLayerParams = collections.namedtuple('SequenceLogitsParams', [
-    'num_lstm_units', 'weight_decay', 'lstm_state_clip_value'
+    'num_lstm_units', 'weight_decay', 'lstm_state_clip_value',
 ])
 
 
@@ -258,7 +319,6 @@ class SequenceLayerBase(object):
           initial_state=lstm_cell.zero_state(self._batch_size, tf.float32),
           loop_function=self.get_input,
           cell=lstm_cell)
-
     with tf.variable_scope('logits'):
       logits_list = [
           tf.expand_dims(self.char_logit(logit, i), dim=1)
@@ -345,7 +405,6 @@ class NetSliceWithAutoregression(NetSlice):
     image_feature = self.get_image_feature(i)
     return tf.concat([image_feature, prev], 1)
 
-
 class Attention(SequenceLayerBase):
   """A layer which uses attention mechanism to select image features."""
 
@@ -373,18 +432,19 @@ class Attention(SequenceLayerBase):
         cell=cell,
         loop_function=self.get_input)
 
-
 class AttentionWithAutoregression(Attention):
   """A layer which uses both attention and auto regression."""
 
   def __init__(self, *args, **kwargs):
     super(AttentionWithAutoregression, self).__init__(*args, **kwargs)
 
+
   def get_train_input(self, prev, i):
     """See SequenceLayerBase.get_train_input for details."""
     if i == 0:
       return self._zero_label
     else:
+
       # TODO(gorban): update to gradually introduce gt labels.
       return self._labels_one_hot[:, i - 1, :]
 
@@ -397,7 +457,103 @@ class AttentionWithAutoregression(Attention):
       return self.char_one_hot(logit)
 
 
-def get_layer_class(use_attention, use_autoregression):
+
+class NewAPIAttentionWithAutoregression(SequenceLayerBase):
+  """A layer which uses attention mechanism to select image features."""
+
+  def __init__(self, *args, **kwargs):
+    super(NewAPIAttentionWithAutoregression, self).__init__(*args, **kwargs)
+    self._zero_label = tf.zeros(
+      [self._batch_size, self._params.num_char_classes])
+
+  def create_logits(self):
+    """Creates character sequence logits for a net specified in the constructor.
+
+    A "main" method for the sequence layer which glues together all pieces.
+
+    Returns:
+      A tensor with shape [batch_size, seq_length, num_char_classes].
+    """
+    with tf.variable_scope('LSTM'):
+      first_label = self.get_input(prev=None, i=0)
+      decoder_inputs = [first_label] + [None] * (self._params.seq_length - 1)
+      lstm_cell = tf.contrib.rnn.LSTMCell(
+        self._mparams.num_lstm_units,
+          use_peepholes=False,
+          cell_clip=self._mparams.lstm_state_clip_value,
+          state_is_tuple=True,
+          initializer=orthogonal_initializer)
+      lstm_outputs = self.unroll_cell(
+          decoder_inputs=decoder_inputs,
+          initial_state=lstm_cell.zero_state(self._batch_size, tf.float32),
+          loop_function=self.get_input,
+          cell=lstm_cell)
+    return lstm_outputs
+
+  def get_eval_input(self, prev, i):
+    """See SequenceLayerBase.get_eval_input for details."""
+    #del prev, i
+    # The attention_decoder will fetch image features from the net, no need for
+    # extra inputs.
+    return self._zero_label
+
+  def get_train_input(self, prev, i):
+    """See SequenceLayerBase.get_train_input for details."""
+    if i == 0:
+      return self._zero_label
+    else:
+      return self._labels_one_hot[:, i - 1, :]
+
+  def create_inputs(self):
+    if self.is_training():
+      return tf.convert_to_tensor([self.get_train_input(None, i) for i in range(0, self._params.seq_length)],
+                                            dtype=tf.float32)
+    else:
+      return tf.convert_to_tensor([self.get_eval_input(None, i) for i in range(0, self._params.seq_length)],dtype=tf.float32)
+
+  def unroll_cell(self, decoder_inputs, initial_state, loop_function, cell):
+    self._net = create_bilstm_encoder_if_enabled_in_mparams(self._net, self._mparams, self._batch_size)
+
+    cell = tf.contrib.seq2seq.AttentionWrapper(cell, select_attention_mechanism(self._net, self._mparams), output_attention=False)
+    cell = tf.contrib.rnn.OutputProjectionWrapper(cell, self._params.num_char_classes)
+    initial_state = cell.zero_state(dtype=tf.float32, batch_size=self._batch_size)
+    sampling_probability = create_sampling_if_enabled_in_mparams(self._mparams, self.is_training())
+    decoder_inputs = self.create_inputs()
+
+    # Convert <seq_len, batch_size, num_characters> to
+    # <batch_size, seq_len, num_characters>.
+    decoder_inputs = tf.transpose(decoder_inputs, [1, 0, 2])
+
+    def eval_input(inputs):
+      return self.char_one_hot(inputs)
+
+    helper = tf.contrib.seq2seq.ScheduledOutputTrainingHelper(
+      decoder_inputs,
+      next_inputs_fn=eval_input,
+      sequence_length=[self._params.seq_length] * self._batch_size,
+      sampling_probability=sampling_probability)
+
+    decoder = tf.contrib.seq2seq.BasicDecoder(
+      cell,
+      helper,
+      initial_state=initial_state)
+
+    output, _, _ = tf.contrib.seq2seq.dynamic_decode(decoder=decoder, impute_finished = False, maximum_iterations=self._params.seq_length)
+    logits, _ = output
+    shape = [self._batch_size, self._params.seq_length, self._params.num_char_classes]
+    # 'Hack': dynamic_decode always assumes unknown output seq length
+    # even though we know that it will be padded, constant length (max seq length for fsns = 37).
+    logits.set_shape(shape)
+    return logits
+
+class AttentionWithAutoregressionWithOptionalsBiLSTMEncoder(AttentionWithAutoregression):
+  """AttentionWithAutoregression + optional BiLSTM encoder."""
+
+  def __init__(self, *args, **kwargs):
+    super(AttentionWithAutoregressionWithOptionalsBiLSTMEncoder, self).__init__(*args, **kwargs)
+    self._net = create_bilstm_encoder_if_enabled_in_mparams(self._net, self._mparams, self._batch_size)
+
+def get_layer_class(use_attention, use_autoregression, model_id):
   """A convenience function to get a layer class based on requirements.
 
   Args:
@@ -408,7 +564,7 @@ def get_layer_class(use_attention, use_autoregression):
     One of available sequence layers (child classes for SequenceLayerBase).
   """
   if use_attention and use_autoregression:
-    layer_class = AttentionWithAutoregression
+      layer_class = AttentionWithAutoregressionWithOptionalsBiLSTMEncoder if 'old_api' in model_id else NewAPIAttentionWithAutoregression
   elif use_attention and not use_autoregression:
     layer_class = Attention
   elif not use_attention and not use_autoregression:

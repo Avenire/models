@@ -67,6 +67,8 @@ def sequence_accuracy(predictions, targets, rej_char, streaming=False):
   """
 
   with tf.variable_scope('SequenceAccuracy'):
+    predictions = predictions[:, 1:]
+    targets = targets[:, 1:]
     predictions.get_shape().assert_is_compatible_with(targets.get_shape())
 
     targets = tf.to_int32(targets)

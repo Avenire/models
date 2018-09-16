@@ -25,6 +25,7 @@ from tensorflow.contrib import slim
 from tensorflow import app
 from tensorflow.python.platform import flags
 from tensorflow.contrib.tfprof import model_analyzer
+import numpy as np
 
 import data_provider
 import common_flags
@@ -48,10 +49,10 @@ flags.DEFINE_integer('save_summaries_secs', 60,
 flags.DEFINE_integer('save_interval_secs', 600,
                      'Frequency in seconds of saving the model.')
 
-flags.DEFINE_integer('max_number_of_steps', int(1e10),
+flags.DEFINE_integer('max_number_of_steps', int(40000),
                      'The maximum number of gradient steps.')
 
-flags.DEFINE_string('checkpoint_inception', '',
+flags.DEFINE_string('checkpoint_inception', './inception_v3.ckpt',
                     'Checkpoint to recover inception weights from.')
 
 flags.DEFINE_float('clip_gradient_norm', 2.0,
@@ -69,6 +70,9 @@ flags.DEFINE_integer('total_num_replicas', 1,
 
 flags.DEFINE_integer('startup_delay_steps', 15,
                      'Number of training steps between replicas startup.')
+flags.DEFINE_integer('seed_base', 1234,
+                     'Base seed xored with max_steps')
+
 
 flags.DEFINE_boolean('reset_train_dir', False,
                      'If true will delete all files in the train_log_dir')
@@ -138,8 +142,14 @@ def train(loss, init_fn, hparams):
       optimizer,
       summarize_gradients=True,
       clip_gradient_norm=FLAGS.clip_gradient_norm)
+  global_step = tf.train.get_or_create_global_step()
+
+  config = tf.ConfigProto()
+  config.gpu_options.allow_growth=True
 
   slim.learning.train(
+      session_config=config,
+      global_step=global_step,
       train_op=train_op,
       logdir=FLAGS.train_log_dir,
       graph=loss.graph,
@@ -175,6 +185,11 @@ def calculate_graph_metrics():
 
 
 def main(_):
+  # Couldn't find a way to restore RNG state so everytime training is stopped for evaluation
+  # set seed in a deterministic manner next time training is resumed.
+  seed=FLAGS.seed_base^FLAGS.max_number_of_steps
+  np.random.seed(seed)
+  tf.set_random_seed(seed)
   prepare_training_dir()
 
   dataset = common_flags.create_dataset(split_name=FLAGS.split_name)
@@ -192,13 +207,14 @@ def main(_):
     data = data_provider.get_data(
         dataset,
         FLAGS.batch_size,
-        augment=hparams.use_augment_input,
+        augment=hparams.use_augment_input, seed=seed,
         central_crop_size=common_flags.get_crop_size())
     endpoints = model.create_base(data.images, data.labels_one_hot)
     total_loss = model.create_loss(data, endpoints)
     model.create_summaries(data, endpoints, dataset.charset, is_training=True)
     init_fn = model.create_init_fn_to_restore(FLAGS.checkpoint,
                                               FLAGS.checkpoint_inception)
+
     if FLAGS.show_graph_stats:
       logging.info('Total number of weights in the graph: %s',
                    calculate_graph_metrics())
